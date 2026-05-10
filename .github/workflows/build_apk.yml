@@ -7,61 +7,109 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04        # 20.04 is more compatible with buildozer
     timeout-minutes: 120
 
     steps:
-      # ── 1. Get your code ─────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Verify all required files are present ──────────────────────────────
-      - name: Check required files
-        run: |
-          echo "📁 Files in repo:"
-          ls -la
-          MISSING=0
-          for f in main.py database.py buildozer.spec; do
-            if [ -f "$f" ]; then
-              echo "  ✓ $f"
-            else
-              echo "  ✗ MISSING: $f  ← you must upload this to GitHub!"
-              MISSING=1
-            fi
-          done
-          [ $MISSING -eq 1 ] && exit 1 || echo "All files present ✓"
+      # ── 2. Python 3.10 ───────────────────────────────────────────────────────
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-      # ── 3. Cache the heavy Android SDK/NDK downloads ──────────────────────────
-      - name: Cache Buildozer global directory
+      # ── 3. System packages (Java 11 works best with buildozer) ────────────────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git zip unzip wget \
+            openjdk-11-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libtinfo5 cmake libffi-dev libssl-dev \
+            build-essential
+          java -version
+
+      # ── 4. Install Android SDK + Build Tools + AIDL manually ─────────────────
+      - name: Install Android SDK and AIDL
+        run: |
+          # Download Android command-line tools
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip \
+            -O cmdtools.zip
+          
+          sudo mkdir -p /opt/android-sdk/cmdline-tools
+          sudo unzip -q cmdtools.zip -d /opt/android-sdk/cmdline-tools
+          sudo mv /opt/android-sdk/cmdline-tools/cmdline-tools \
+            /opt/android-sdk/cmdline-tools/latest
+          
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin
+          
+          # Accept licenses silently
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          
+          # Install build-tools (contains aidl), platform, and NDK 25c
+          sdkmanager \
+            "build-tools;33.0.2" \
+            "platforms;android-33" \
+            "ndk;25.2.9519653"
+          
+          # Verify aidl is present
+          echo "✓ aidl location:"
+          find /opt/android-sdk -name "aidl" 2>/dev/null
+          
+          # Export to all subsequent steps
+          echo "ANDROID_SDK_ROOT=/opt/android-sdk" >> $GITHUB_ENV
+          echo "ANDROIDSDK=/opt/android-sdk"         >> $GITHUB_ENV
+          echo "ANDROIDNDK=/opt/android-sdk/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROIDNDK_VERSION=25.2.9519653"     >> $GITHUB_ENV
+          echo "/opt/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "/opt/android-sdk/build-tools/33.0.2"        >> $GITHUB_PATH
+
+      # ── 5. Python build tools ────────────────────────────────────────────────
+      - name: Install Buildozer and Cython
+        run: |
+          pip install --upgrade pip
+          pip install buildozer==1.5.0 cython==0.29.33
+          buildozer version
+
+      # ── 6. Cache ~/.buildozer to speed up repeat builds ───────────────────────
+      - name: Cache Buildozer directory
         uses: actions/cache@v4
-        id: cache-buildozer
         with:
           path: ~/.buildozer
-          key: buildozer-global-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-global-
+            buildozer-${{ runner.os }}-
 
-      # ── 4. Build using the official Buildozer Docker action ───────────────────
-      #    This image ships with Python, Android SDK, NDK, AIDL — everything.
-      - name: Build APK with Buildozer Docker Action
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
-        with:
-          command: buildozer android debug
-          workdir: .
-          buildozer-version: stable
-
-      # ── 5. Show what was produced ─────────────────────────────────────────────
-      - name: List APK files
+      # ── 7. Build the APK ─────────────────────────────────────────────────────
+      - name: Build APK
         run: |
-          echo "📦 Built files:"
-          find . -name "*.apk" -exec ls -lh {} \;
+          buildozer -v android debug
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROIDSDK: ${{ env.ANDROIDSDK }}
+          ANDROIDNDK: ${{ env.ANDROIDNDK }}
+          ANDROIDNDK_VERSION: ${{ env.ANDROIDNDK_VERSION }}
+          PATH: ${{ env.PATH }}
 
-      # ── 6. Upload APK so you can download it ──────────────────────────────────
+      # ── 8. List what was built ────────────────────────────────────────────────
+      - name: Show built files
+        run: |
+          echo "=== bin/ contents ==="
+          ls -lh bin/ 2>/dev/null || echo "No bin/ folder — build failed"
+          find . -name "*.apk" 2>/dev/null
+
+      # ── 9. Upload APK for download ────────────────────────────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: PackManager-APK
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
           if-no-files-found: error
           retention-days: 30

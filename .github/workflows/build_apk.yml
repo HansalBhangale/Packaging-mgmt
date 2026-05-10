@@ -7,43 +7,61 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
+      # ── 1. Get your code ─────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install system dependencies
+      # ── 2. Verify all required files are present ──────────────────────────────
+      - name: Check required files
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            git zip unzip openjdk-17-jdk \
-            autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libncursesw5-dev \
-            cmake libffi-dev libssl-dev
+          echo "📁 Files in repo:"
+          ls -la
+          MISSING=0
+          for f in main.py database.py buildozer.spec; do
+            if [ -f "$f" ]; then
+              echo "  ✓ $f"
+            else
+              echo "  ✗ MISSING: $f  ← you must upload this to GitHub!"
+              MISSING=1
+            fi
+          done
+          [ $MISSING -eq 1 ] && exit 1 || echo "All files present ✓"
 
-      - name: Install Buildozer + Cython
-        run: pip install buildozer cython==0.29.33
-
+      # ── 3. Cache the heavy Android SDK/NDK downloads ──────────────────────────
       - name: Cache Buildozer global directory
         uses: actions/cache@v4
+        id: cache-buildozer
         with:
           path: ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-${{ runner.os }}-
+          key: buildozer-global-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-global-
 
-      - name: Build APK
-        run: buildozer -v android debug
+      # ── 4. Build using the official Buildozer Docker action ───────────────────
+      #    This image ships with Python, Android SDK, NDK, AIDL — everything.
+      - name: Build APK with Buildozer Docker Action
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer
+        with:
+          command: buildozer android debug
+          workdir: .
+          buildozer-version: stable
 
+      # ── 5. Show what was produced ─────────────────────────────────────────────
+      - name: List APK files
+        run: |
+          echo "📦 Built files:"
+          find . -name "*.apk" -exec ls -lh {} \;
+
+      # ── 6. Upload APK so you can download it ──────────────────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: PackManager-APK
-          path: bin/*.apk
+          path: ${{ steps.buildozer.outputs.filename }}
+          if-no-files-found: error
           retention-days: 30
